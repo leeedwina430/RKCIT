@@ -1,4 +1,4 @@
-# RKCIT
+# RHSIC & RKCIT
 This repository contains the official implementation of **RHSIC** and **RKCIT** from the paper:
 > **Extracting Rare Dependence Patterns via Adaptive Sample Reweighting** (ICML 2025).
 
