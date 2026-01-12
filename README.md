@@ -7,7 +7,7 @@ The code requires Python 3.x. You can install the necessary dependencies using t
 
 ### 1. Install general dependencies
 ```bash
-pip install scipy tqdm torch causal-learn scikit-learn
+pip install scipy tqdm torch scikit-learn causal-learn
 ```
 
 ### 2. Install kerpy
