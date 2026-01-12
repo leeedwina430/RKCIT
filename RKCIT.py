@@ -1,7 +1,5 @@
 from tqdm import tqdm
 import torch
-import torch.nn as nn
-import torch.optim as optim
 import torch.nn.utils as utils
 from scipy.spatial.distance import cdist, pdist, squareform
 from scipy import special, spatial
