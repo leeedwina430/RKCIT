@@ -1,5 +1,6 @@
-from RHSIC import RHSIC_RFF_test
 import numpy as np
+from RHSIC import RHSIC_RFF_test
+from generate_Uncond import data_gen_1, data_gen_2_index, data_gen_3_index
 
 def example_data(n_samples, test_type, tau, noise="gaussian"):
     if noise == "gaussian":
@@ -25,6 +26,9 @@ def example_data(n_samples, test_type, tau, noise="gaussian"):
 
 
 if __name__ == "__main__":
+    '''
+    A simple demo
+    '''
     # np.random.seed(0)
     num_samples = 500
     test_type = False
@@ -39,5 +43,30 @@ if __name__ == "__main__":
 
     results = RHSIC_RFF_test(x, y, s)
     p_value, stat = results
+    print(f"RHSIC test p-value: {p_value}, statistic: {stat}")
+
+    '''
+    Data Generations used in the paper. Please refer to generate_Uncond.py for more details.
+    '''
+    seed=0
+    np.random.seed(seed)
+    gen_type = "dataset_1"  # "dataset_1": DG I, "dataset_2": DG II, "dataset_3": DG III
+
+    if gen_type == "dataset_1":
+        x, y, s = data_gen_1(
+            n_samples=num_samples, test_type=test_type, tau=tau, noise=noise
+        )
+    elif gen_type == "dataset_2":
+        x, y, s = data_gen_2_index(
+            n_samples=num_samples, test_type=test_type, index=seed, tau=tau, noise=noise
+        )
+    elif gen_type == "dataset_3":
+        x, y, s = data_gen_3_index(
+            n_samples=num_samples, test_type=test_type, index=seed, tau=tau, noise=noise
+        )
+
+    results = RHSIC_RFF_test(x, y, s)
+    p_value, stat = results
+    print(f"\n{gen_type}: {'H0' if test_type else 'H1'}, {num_samples} samples, tau={tau}, noise={noise}")
     print(f"RHSIC test p-value: {p_value}, statistic: {stat}")
     
