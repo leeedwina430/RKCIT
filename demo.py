@@ -50,6 +50,7 @@ if __name__ == "__main__":
     '''
     seed=0
     np.random.seed(seed)
+    tau = 0.03
     gen_type = "dataset_1"  # "dataset_1": DG I, "dataset_2": DG II, "dataset_3": DG III
 
     if gen_type == "dataset_1":
@@ -69,4 +70,3 @@ if __name__ == "__main__":
     p_value, stat = results
     print(f"\n{gen_type}: {'H0' if test_type else 'H1'}, {num_samples} samples, tau={tau}, noise={noise}")
     print(f"RHSIC test p-value: {p_value}, statistic: {stat}")
-    
