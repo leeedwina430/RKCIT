@@ -1,152 +1,149 @@
-from tqdm import tqdm
-import time
+"""
+Copyright (c) 2016 oxmlcs
+All rights reserved.
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions are met:
+ *
+1. Redistributions of source code must retain the above copyright notice, this
+   list of conditions and the following disclaimer.
+2. Redistributions in binary form must reproduce the above copyright notice,
+   this list of conditions and the following disclaimer in the documentation
+   and/or other materials provided with the distribution.
+ *
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
+ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE LIABLE FOR
+ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
+(INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
+LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND
+ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+(INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ *
+The views and conclusions contained in the software and documentation are those
+of the authors and should not be interpreted as representing official policies,
+either expressed or implied, of the author.
+"""
 import numpy as np
 from scipy import stats
 from scipy.optimize import minimize
+from scipy.spatial.distance import pdist, squareform
 from sklearn.model_selection import train_test_split
-from kerpy.GaussianKernel import GaussianKernel
 
-#############################################
-#          Some helper functions            #
-#############################################
+def _validate_inputs(*arrays):
+    result = []
+    for value in arrays:
+        array = np.asarray(value, dtype=np.float64)
+        if array.ndim == 1:
+            array = array.reshape(-1, 1)
+        if array.ndim != 2 or array.shape[1] == 0 or not np.all(np.isfinite(array)):
+            raise ValueError("Inputs must be finite 2D arrays with at least one column.")
+        result.append(array)
+    n = result[0].shape[0]
+    if n < 4 or any(array.shape[0] != n for array in result):
+        raise ValueError("Inputs must have equal row counts and at least four rows.")
+    return result
 
-def more_than_tau_indices(array, tau):
-    temp = np.where(np.array(array)>tau)[0]
-    return temp
 
-def kernel_matrix(data_x):
-    kernelX = GaussianKernel()
-    kernelX.set_width_empirical_hsic(data_x)
+def _validate_options(max_iter, n_perm):
+    for name, value in (("max_iter", max_iter), ("n_perm", n_perm)):
+        if isinstance(value, (bool, np.bool_)) or not isinstance(value, (int, np.integer)) or value < 1:
+            raise ValueError(name + " must be a positive integer.")
 
+
+def _kernel_matrix(data_x):
+    # Inline empirical HSIC width and Gaussian kernel from the frozen dependency.
+    n = data_x.shape[0]
+    width = 0.8 if n < 200 else (0.5 if n < 1200 else 0.3)
+    theta = 1.0 / (width ** 2)
+    width = theta * data_x.shape[1]
     data_x = stats.zscore(data_x, ddof=1, axis=0)
-    data_x[np.isnan(data_x)] = 0.   
+    data_x[np.isnan(data_x)] = 0.
+    sq_dists = squareform(pdist(data_x, 'sqeuclidean'))
+    return np.exp(-0.5 * sq_dists * width)
 
-    Kx = kernelX.kernel(data_x)
-    return Kx
 
-def compute_rff(data_x, kernelX=GaussianKernel(), num_rfx=20):
-    kernelX.rff_generate(num_rfx,dim=data_x.shape[1])
-    phix = kernelX.rff_expand(data_x)
-    return phix
+def _compute_rff(data_x):
+    rff_num = 20
+    unit_rff_freq = np.random.randn(int(rff_num / 2), data_x.shape[1])
+    rff_freq = unit_rff_freq * np.sqrt(1.0 / 1.0)
+    xdotw = np.dot(data_x, rff_freq.T)
+    return np.sqrt(2. / rff_num) * np.concatenate((np.cos(xdotw), np.sin(xdotw)), axis=1)
 
-def HSIC_rff_beta(phix, phiy, betas):
-    m = phix.shape[0]
+
+def _hsic(phix, phiy, betas, _observed_arrays=None):
     if len(betas.shape) == 1:
         betas = betas.reshape(-1, 1)
-    if np.sum(betas<0) > 0:
-        betas[betas<0] += 1e-4
-    phix_c = (phix - np.mean(phix * betas,axis=0)) * np.sqrt(betas)
-    phiy_c = (phiy - np.mean(phiy * betas,axis=0)) * np.sqrt(betas)
-    featCov = phix_c.T @ phiy_c 
+    if np.sum(betas < 0) > 0:
+        betas[betas < 0] += 1e-4
+    phix_c = (phix - np.mean(phix * betas, axis=0)) * np.sqrt(betas)
+    phiy_c = (phiy - np.mean(phiy * betas, axis=0)) * np.sqrt(betas)
+    featCov = phix_c.T @ phiy_c
+    if _observed_arrays is not None:
+        _observed_arrays.extend((phix_c, phiy_c, featCov))
     return np.linalg.norm(featCov)**2, np.linalg.norm(phix_c.T @ phix_c), np.linalg.norm(phiy_c.T @ phiy_c)
 
 
-#############################################
-#                RHSIC_RFF                  #
-#############################################
-
-def RHSIC_RFF_test(x, y, s, return_betas=False):
-    '''RHSIC with RFF and alpha optimization.'''
+def RHSIC_RFF_test(x, y, s, return_betas=False, *, max_iter=50, n_perm=2000, verbose=False):
+    x, y, s = _validate_inputs(x, y, s)
+    _validate_options(max_iter, n_perm)
     n = x.shape[0]
-    ITERS = 50   #10000
-    lam_reg1 = 1e-3 #1e-4
-    lam_reg2 = 1e-3
-
-    # NOTE: random split 
-    x_train, x_test, y_train, y_test, s_train, s_test = train_test_split(x, y, s, test_size=0.5, random_state=42)
-    s = np.vstack([s_train, s_test])
-    Ks = kernel_matrix(s)
-    Ks_train = Ks[:s_train.shape[0], :s_train.shape[0]] + 1e-6 * np.eye(s_train.shape[0], dtype=np.float32)   # add small noise to diagonal to make it positive definite
+    x_train, x_test, y_train, y_test, s_train, s_test = train_test_split(
+        x, y, s, test_size=0.5, random_state=42)
+    Ks = _kernel_matrix(np.vstack([s_train, s_test]))
+    Ks_train = Ks[:s_train.shape[0], :s_train.shape[0]] + 1e-6 * np.eye(s_train.shape[0], dtype=np.float32)
     Ks_test = Ks[s_train.shape[0]:, :s_train.shape[0]]
-    
-    phix_test, phiy_test, phix_train, phiy_train = compute_rff(x_test), compute_rff(y_test), compute_rff(x_train), compute_rff(y_train)
+    phix_test, phiy_test, phix_train, phiy_train = (_compute_rff(x_test), _compute_rff(y_test),
+                                                 _compute_rff(x_train), _compute_rff(y_train))
 
     def objective(alpha):
         n = phix_train.shape[0]
         betas = Ks_train @ alpha
-        HSIC, varx, vary = HSIC_rff_beta(phix_train, phiy_train, betas)
+        HSIC, varx, vary = _hsic(phix_train, phiy_train, betas)
         reg1 = alpha @ Ks_train @ alpha
         reg2 = np.sum(betas * betas) / n
-        return - np.log(HSIC) + np.log(varx) + np.log(vary) + lam_reg1 * reg1 + lam_reg2 * reg2
+        return - np.log(HSIC) + np.log(varx) + np.log(vary) + 1e-3 * reg1 + 1e-3 * reg2
 
     def constraint_eq(alpha):
-        n = Ks_train.shape[0]
-        betas = Ks_train @ alpha
-        return np.sum(betas) - n
+        return np.sum(Ks_train @ alpha) - Ks_train.shape[0]
 
     def constraint_ineq(alpha):
-        betas = Ks_train @ alpha
-        return betas
+        return Ks_train @ alpha
 
-    constraints = [
-        {'type': 'eq', 'fun': constraint_eq},
-        {'type': 'ineq', 'fun': constraint_ineq}
-    ]
+    constraints = [{'type': 'eq', 'fun': constraint_eq}, {'type': 'ineq', 'fun': constraint_ineq}]
+    alpha0 = np.linalg.solve(Ks_train, np.ones(n // 2, dtype=np.float32))
 
-    alpha0 = np.linalg.solve(Ks_train, np.ones(n//2, dtype=np.float32))
-    print(f"alpha0's beta < 0: {np.sum(Ks_train @ alpha0 < 0)}")
+    def callback(alpha):
+        loss = objective(alpha)
+        if verbose:
+            print('objective:', loss)
 
-    previous_x = [0]; count = [0]
-    def callback_func(x):
-        betas = Ks_train @ x
-        print(f"iter: {count[-1]} | alpha diff: {np.sum(x-previous_x[-1]):.2f}, loss: {objective(x):.2f}")
-        print(f"    beta < 0: {np.sum(betas<0):.2f}, min(betas): {np.min(betas):.2f}, sum(betas): {np.sum(betas):.2f}")
-        previous_x[-1] = x; count[-1] += 1
-
-    start = time.time()
-    result = minimize(objective, alpha0, constraints=constraints, method='SLSQP', callback=callback_func, options={'disp': True, 'maxiter': ITERS})
-    print(f"Time passed: {time.time()-start}s")
-
-    optimized_train_betas = Ks_train @ result.x
-    print(f"train beta > 1: {np.sum(optimized_train_betas > 1)}, sum: {np.sum(optimized_train_betas)}, <0: {np.sum(optimized_train_betas < 0)}")
-
-    optimized_test_betas = Ks_test @ result.x
-    print(f"test beta > 1: {np.sum(optimized_test_betas > 1)}, sum: {np.sum(optimized_test_betas)}, <0: {np.sum(optimized_test_betas < 0)}")
-
-    index_train = more_than_tau_indices(optimized_train_betas, 1.0)
-    index_test = more_than_tau_indices(optimized_test_betas, 1.0)
-    drop_index_train = np.delete(np.arange(n//2), index_train)
-    add_train = np.sum(optimized_train_betas[drop_index_train]) / len(index_train)
-    optimized_train_betas[drop_index_train] = 0.0
-    optimized_train_betas[index_train] = optimized_train_betas[index_train] + add_train
-    print(f"\ntrain beta > 1: {np.sum(optimized_train_betas > 1)}, sum: {np.sum(optimized_train_betas)}, <0: {np.sum(optimized_train_betas < 0)}")
-
-    drop_index_test = np.delete(np.arange(n//2), index_test)
-    add_test = np.sum(optimized_test_betas[drop_index_test]) / len(index_test)
-    optimized_test_betas[drop_index_test] = 0.0
-    optimized_test_betas[index_test] = optimized_test_betas[index_test] + add_test
-    print(f"test beta > 1: {np.sum(optimized_test_betas > 1)}, sum: {np.sum(optimized_test_betas)}, <0: {np.sum(optimized_test_betas < 0)}")
-    ###############################################################################################################
-    otrain_HSIC, otrain_varx, otrain_vary = HSIC_rff_beta(phix_train, phiy_train, np.ones(n//2, dtype=np.float32)) #len(index_train)
-    print(f"original train HSIC: {otrain_HSIC}, obj: {otrain_HSIC/otrain_varx/otrain_vary}")
-
-    train_HSIC, train_varx, train_vary = HSIC_rff_beta(phix_train, phiy_train, optimized_train_betas)
-    print(f"reweighed train HSIC: {train_HSIC}, obj: {train_HSIC/train_varx/train_vary}")
-    ###############################################################################################################
-    
-    otest_HSIC, otest_varx, otest_vary = HSIC_rff_beta(phix_test, phiy_test, np.ones(n//2, dtype=np.float32)) #len(index_test)
-    print(f"original test HSIC: {otest_HSIC}, obj: {otest_HSIC/otest_varx/otest_vary}")
-
-    test_HSIC, test_varx, test_vary = HSIC_rff_beta(phix_test, phiy_test, optimized_test_betas)
-    print(f"reweighed test HSIC: {test_HSIC}, obj: {test_HSIC/test_varx/test_vary}")
-
-    def compute_pvalue_perm(test_stat, phix, y, betas, n_perm=2000):
-        stats = []
-        temp_y = y.copy()
-        for i in tqdm(range(n_perm), total=n_perm):
-            perm_index = np.random.permutation(list(range(y.shape[0])))
-            temp_y = y[perm_index]
-            phiy_new = compute_rff(temp_y)
-            temp_stat, _, _ = HSIC_rff_beta(phix, phiy_new, betas)
-            stats.append(temp_stat)
-
-        p = np.sum(np.array(stats) > test_stat) / n_perm
-        return p
-
-    p = compute_pvalue_perm(test_HSIC, phix_test, y_test, optimized_test_betas)
-
-    if return_betas:
-        return p, test_HSIC, optimized_test_betas, x_test, y_test
-    
-    return p, test_HSIC
-    
+    result = minimize(objective, alpha0, constraints=constraints, method='SLSQP', callback=callback,
+                      options={'disp': verbose, 'maxiter': max_iter})
+    train_betas = Ks_train @ result.x
+    test_betas = Ks_test @ result.x
+    for betas, size in ((train_betas, n // 2), (test_betas, n - n // 2)):
+        index = np.where(np.array(betas) > 1.0)[0]
+        drop_index = np.delete(np.arange(size), index)
+        add = np.sum(betas[drop_index]) / len(index)
+        betas[drop_index] = 0.0
+        betas[index] = betas[index] + add
+    observed = {}
+    observed_arrays = []
+    observed['original_train'] = _hsic(phix_train, phiy_train, np.ones(n // 2, dtype=np.float32), _observed_arrays=observed_arrays)
+    observed['weighted_train'] = _hsic(phix_train, phiy_train, train_betas, _observed_arrays=observed_arrays)
+    observed['original_test'] = _hsic(phix_test, phiy_test, np.ones(phix_test.shape[0], dtype=np.float32), _observed_arrays=observed_arrays)
+    observed['weighted_test'] = _hsic(phix_test, phiy_test, test_betas, _observed_arrays=observed_arrays)
+    test_stat = observed['weighted_test'][0]
+    null = []
+    for _ in range(n_perm):
+        perm_index = np.random.permutation(list(range(y_test.shape[0])))
+        phiy_new = _compute_rff(y_test[perm_index])
+        temp_stat, _, _ = _hsic(phix_test, phiy_new, test_betas)
+        null.append(temp_stat)
+    null = np.asarray(null)
+    p = np.sum(null > test_stat) / n_perm
+    values = (p, test_stat, test_betas, x_test, y_test) if return_betas else (p, test_stat)
+    return values
