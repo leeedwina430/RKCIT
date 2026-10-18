@@ -19,7 +19,7 @@ python -m pip install -r requirements.txt
 python demo.py
 ```
 
-The algorithms require NumPy, SciPy and scikit-learn; the demo also uses threadpoolctl. No external generator file, experiment directory, kerpy, causal-learn, PyTorch or directory is needed.
+The algorithms require NumPy, SciPy and scikit-learn; the demo also uses threadpoolctl. 
 
 Edit the settings at the bottom of `demo.py`, following the original demo's style.
 
